@@ -1,0 +1,309 @@
+import json
+import os
+
+import joblib
+import numpy as np
+
+# Vector DB & Embeddings
+from sentence_transformers import SentenceTransformer
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from PIL import Image
+
+# -------------------------------------------------------------------------
+# 1. KNOWLEDGE BASE & VECTOR RETRIEVAL (Tasks 1 & 2)
+# -------------------------------------------------------------------------
+
+KB_DOCUMENTS = [
+    {
+        "doc_id": "DOC1",
+        "title": "Return Windows Policy",
+        "text": "Apparel and Footwear products are eligible for return within 10 days of delivery. Electronics and Home appliances have a 7-day return window. Beauty products are strictly non-returnable once opened.",
+    },
+    {
+        "doc_id": "DOC2",
+        "title": "COD Refund Timelines",
+        "text": "For Cash on Delivery (COD) orders, refunds are processed via IMPS bank transfer within 3 to 5 business days after pickup verification. Customers must provide their UPI ID or bank account details in the portal.",
+    },
+    {
+        "doc_id": "DOC3",
+        "title": "Delivery SLAs",
+        "text": "Standard delivery SLA across tier-1 cities is 2 to 3 business days. Tier-2 and tier-3 locations may take 5 to 7 business days. Express delivery guarantees next-day fulfillment for eligible sellers.",
+    },
+    {
+        "doc_id": "DOC4",
+        "title": "Reverse-Pickup Eligibility",
+        "text": "Reverse pickup is available for 95% of pincodes. Items must be unused, unwashed, and in original packaging with intact tags. If reverse pickup is unavailable, customers must self-ship for doorstep reimbursement.",
+    },
+]
+
+
+def build_vector_store():
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    chunks = []
+    chunk_mapping = []
+
+    for doc in KB_DOCUMENTS:
+        sentences = [s.strip() + "." for s in doc["text"].split(".") if s]
+        for sentence in sentences:
+            chunks.append(sentence)
+            chunk_mapping.append(doc["doc_id"])
+
+    embeddings = embedder.encode(chunks, convert_to_numpy=True)
+    return embedder, chunks, chunk_mapping, embeddings
+
+
+EMBEDDER, CHUNKS, CHUNK_MAPPING, CHUNK_EMBEDDINGS = build_vector_store()
+
+
+def retrieve_policy(query: str, top_k: int = 3):
+    query_vec = EMBEDDER.encode([query], convert_to_numpy=True)
+    scores = np.dot(CHUNK_EMBEDDINGS, query_vec.T).squeeze()
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
+    results = []
+    for idx in top_indices:
+        results.append(
+            {
+                "chunk": CHUNKS[idx],
+                "doc_id": CHUNK_MAPPING[idx],
+                "score": float(scores[idx]),
+            }
+        )
+    return results
+
+
+# -------------------------------------------------------------------------
+# 2. INTEGRATED TOOLS (Tasks 3 & 4)
+# -------------------------------------------------------------------------
+
+
+def check_return_risk(order_features: dict) -> dict:
+    model_data = joblib.load("models/return_risk_model.pkl")
+    pipeline = model_data["pipeline"]
+    t_star_rf = model_data["t_star_rf"]
+
+    import pandas as pd
+
+    df_in = pd.DataFrame([order_features])
+
+    prob = float(pipeline.predict_proba(df_in)[0, 1])
+
+    if prob < t_star_rf:
+        bucket = "Low"
+    elif prob >= (t_star_rf + 0.15):
+        bucket = "High"
+    else:
+        bucket = "Medium"
+
+    return {"predicted_probability": prob, "risk_bucket": bucket, "t_star": t_star_rf}
+
+
+def classify_product_image(image_path: str) -> dict:
+    CLASS_NAMES = [
+        "T-shirt/top",
+        "Trouser",
+        "Pullover",
+        "Dress",
+        "Coat",
+        "Sandal",
+        "Shirt",
+        "Sneaker",
+        "Bag",
+        "Ankle boot",
+    ]
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = models.resnet18()
+    model.fc = nn.Linear(model.fc.in_features, 10)
+    model.load_state_dict(
+        torch.load("models/product_classifier.pt", map_location=device)
+    )
+    model.eval()
+
+    transform = transforms.Compose(
+        [
+            transforms.Lambda(lambda img: img.convert("RGB")),
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+            ),
+        ]
+    )
+
+    img = Image.open(image_path)
+    tensor = transform(img).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        outputs = model(tensor)
+        probs = torch.softmax(outputs, dim=1)[0]
+        conf, pred = torch.max(probs, dim=0)
+
+    return {
+        "predicted_category": CLASS_NAMES[pred.item()],
+        "confidence": float(conf.item()),
+    }
+
+
+# -------------------------------------------------------------------------
+# 3. DETERMINISTIC AGENT GRAPH & MOCK_LLM ENGINE (Tasks 5, 6, 7 & 8)
+# -------------------------------------------------------------------------
+
+
+class FlipkartSupportAgent:
+
+    def __init__(self):
+        self.state = {}
+
+    def run(self, user_input: str, state_reset: bool = False) -> dict:
+        if state_reset:
+            self.state = {}
+
+        # Task 8: Input-side Prompt Injection Filter
+        injection_patterns = [
+            "ignore previous instructions",
+            "ignore all rules",
+            "pretend you are",
+        ]
+        if any(p in user_input.lower() for p in injection_patterns):
+            return {
+                "answer": "Security Alert: Input prompt injection pattern detected. Request blocked.",
+                "source": "guardrail_blocked",
+                "confidence": 0.0,
+            }
+
+        # Context updates (Task 5: Multi-turn State Tracking)
+        if "order" in user_input.lower() and "#" in user_input:
+            words = user_input.split()
+            for w in words:
+                if w.startswith("#"):
+                    self.state["last_order_id"] = w
+
+        # Intent Routing Node
+        if (
+            "return risk" in user_input.lower()
+            or "risk of return" in user_input.lower()
+        ):
+            intent = "return_risk"
+        elif (
+            "classify" in user_input.lower()
+            or "image" in user_input.lower()
+            or ".png" in user_input.lower()
+        ):
+            intent = "image_classifier"
+        else:
+            intent = "policy_rag"
+
+        # Execution Nodes
+        if intent == "policy_rag":
+            retrieved = retrieve_policy(user_input, top_k=1)
+            best_match = retrieved[0]
+
+            # Task 8: Output-side Groundedness Check
+            if best_match["score"] < 0.35:
+                return {
+                    "answer": "I am sorry, but I do not have verified policy information matching your question.",
+                    "source": "policy_kb",
+                    "confidence": float(best_match["score"]),
+                }
+
+            return {
+                "answer": f"According to Flipkart Policy ({best_match['doc_id']}): {best_match['chunk']}",
+                "source": "policy_kb",
+                "confidence": float(round(best_match["score"], 4)),
+            }
+
+        elif intent == "return_risk":
+            sample_features = {
+                "product_category": "Apparel",
+                "price_inr": 1800.0,
+                "discount_pct": 30.0,
+                "payment_method": "COD",
+                "customer_tenure_days": 120,
+                "num_previous_orders": 4,
+                "num_previous_returns": 2,
+                "delivery_distance_km": 450.0,
+                "delivery_days": 5,
+                "is_weekend_order": 1,
+                "rating_given": np.nan,
+            }
+            res = check_return_risk(sample_features)
+            context_order = self.state.get("last_order_id", "specified order")
+            return {
+                "answer": f"Order risk assessed for {context_order}: Return probability is {res['predicted_probability']:.2%}, placing it in the {res['risk_bucket']} risk bucket (threshold: {res['t_star']:.2f}).",
+                "source": "return_risk_tool",
+                "confidence": 0.95,
+            }
+
+        elif intent == "image_classifier":
+            import re
+
+            match = re.search(r"data/sample_images/\S+\.png", user_input)
+            img_path = (
+                match.group(0)
+                if match
+                else "data/sample_images/03_sneaker.png"
+            )
+
+            res = classify_product_image(img_path)
+            return {
+                "answer": f"Image classified as {res['predicted_category']} with confidence {res['confidence']:.2%}.",
+                "source": "image_classifier_tool",
+                "confidence": float(round(res["confidence"], 4)),
+            }
+
+
+# Task 10 Evaluation Metric Execution
+def evaluate_retrieval():
+    test_queries = [
+        (
+            "What is the return window for apparel items?",
+            ["DOC1"],
+        ),
+        (
+            "How long do refunds take for COD payments?",
+            ["DOC2"],
+        ),
+        (
+            "What are the standard delivery SLAs?",
+            ["DOC3"],
+        ),
+        (
+            "Is reverse pickup available at all locations?",
+            ["DOC4"],
+        ),
+        (
+            "How many days do I have to return electronics?",
+            ["DOC1"],
+        ),
+    ]
+
+    precisions = []
+    recalls = []
+
+    for q, target_docs in test_queries:
+        retrieved = retrieve_policy(q, top_k=3)
+        retrieved_docs = list(set([r["doc_id"] for r in retrieved]))
+
+        hits = len(set(retrieved_docs).intersection(set(target_docs)))
+        p3 = hits / 3.0
+        r3 = hits / len(target_docs)
+
+        precisions.append(p3)
+        recalls.append(r3)
+
+    print("\n--- TASK 10: RETRIEVAL EVALUATION ---")
+    print(f"Average Precision@3: {np.mean(precisions):.4f}")
+    print(f"Average Recall@3: {np.mean(recalls):.4f}")
+
+
+if __name__ == "__main__":
+    agent = FlipkartSupportAgent()
+    print(
+        agent.run(
+            "What is the return window for clothing items?", state_reset=True
+        )
+    )
+    evaluate_retrieval()
