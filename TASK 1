@@ -1,9 +1,7 @@
+
 import numpy as np
 import pandas as pd
 
-# ==========================================
-# PART 1 - TASK 1: DATASET GENERATION
-# ==========================================
 rng = np.random.default_rng(42)
 N = 6000
 
@@ -65,51 +63,22 @@ z = (
 prob_return = 1 / (1 + np.exp(-z))
 returned = (rng.random(N) < prob_return).astype(int)
 
-df = pd.DataFrame({
-    "order_id": np.arange(1, N + 1),
-    "product_category": product_category,
-    "price_inr": price_inr,
-    "discount_pct": np.round(discount_pct, 1),
-    "payment_method": payment_method,
-    "customer_tenure_days": customer_tenure_days.astype(int),
-    "num_previous_orders": num_previous_orders.astype(int),
-    "num_previous_returns": num_previous_returns.astype(int),
-    "delivery_distance_km": delivery_distance_km,
-    "delivery_days": delivery_days.astype(int),
-    "is_weekend_order": is_weekend_order,
-    "rating_given": rating_given,
-    "returned": returned,
-})
-df.to_csv("orders_dataset.csv", index=False)
-
-# ==========================================
-# PART 1 - TASK 2: VERIFICATION & REPORTING
-# ==========================================
-print("=== TASK 2 VERIFICATION REPORT ===")
-print(f"Total Rows: {len(df)}")
-print(f"Total Columns: {len(df.columns)}")
-print(f"Overall Return Rate: {df['returned'].mean() * 100:.2f}%\n")
-
-missing_rating_pct = df["rating_given"].isna().mean() * 100
-print(f"Missing rating_given Percentage: {missing_rating_pct:.2f}%\n")
-
-print("--- Return Rate by Product Category ---")
-cat_summary = (
-    df.groupby("product_category")["returned"]
-    .agg(Total_Orders="count", Return_Rate=lambda x: f"{x.mean()*100:.2f}%")
-    .reset_index()
+df = pd.DataFrame(
+    {
+        "order_id": np.arange(1, N + 1),
+        "product_category": product_category,
+        "price_inr": price_inr,
+        "discount_pct": np.round(discount_pct, 1),
+        "payment_method": payment_method,
+        "customer_tenure_days": customer_tenure_days.astype(int),
+        "num_previous_orders": num_previous_orders.astype(int),
+        "num_previous_returns": num_previous_returns.astype(int),
+        "delivery_distance_km": delivery_distance_km,
+        "delivery_days": delivery_days.astype(int),
+        "is_weekend_order": is_weekend_order,
+        "rating_given": rating_given,
+        "returned": returned,
+    }
 )
-print(cat_summary.to_string(index=False))
-print("\n--- Return Rate by Payment Method ---")
-pay_summary = (
-    df.groupby("payment_method")["returned"]
-    .agg(Total_Orders="count", Return_Rate=lambda x: f"{x.mean()*100:.2f}%")
-    .reset_index()
-)
-print(pay_summary.to_string(index=False))
-
-print("\n--- Missingness Analysis by Payment Method ---")
-missing_by_pay = df.groupby("payment_method")["rating_given"].apply(
-    lambda x: f"{x.isna().mean()*100:.2f}%"
-)
-print(missing_by_pay)
+df.to_csv("data/orders_dataset.csv", index=False)
+print(f"Rows: {len(df)} | Return rate: {round(df['returned'].mean(), 4)}")
