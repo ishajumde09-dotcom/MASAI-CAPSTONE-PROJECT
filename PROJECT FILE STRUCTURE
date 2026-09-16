@@ -1,0 +1,19 @@
+flipkart-support-assistant/
+├── data/
+│   ├── orders_dataset.csv
+│   └── sample_images/
+│       ├── 01_tshirt.png
+│       ├── 02_trouser.png
+│       ├── 03_sneaker.png
+│       ├── 04_bag.png
+│       └── 05_ankleboot.png
+├── models/
+│   ├── return_risk_model.pkl
+│   └── product_classifier.pt
+├── transcripts/
+│   └── sample_transcripts.txt
+├── generate_orders.py
+├── part1_return_risk.py
+├── part2_image_classifier.py
+├── part3_agent.py
+└── README.md
